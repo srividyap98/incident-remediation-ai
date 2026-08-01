@@ -53,4 +53,4 @@ jobs:
           kubectl set image deployment/"$K8S_DEPLOYMENT" \
             api="$REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" \
             -n "$K8S_NAMESPACE"
-          kubectl rollout status deployment/"$K8S_DEPLOYMENT" -n "$K8S_NAMESPACE" --timeout=180s
+          kubectl rollout status deployment/"$K8S_DEPLOYMENT" -n "$K8S_NAMESPACE" --timeout=400s
