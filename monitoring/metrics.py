@@ -6,7 +6,7 @@ the codebase — they're all registered at module load time.
 """
 from __future__ import annotations
 
-from prometheus_client import Counter, Gauge, Histogram, Summary
+from prometheus_client import Counter, Gauge, Histogram
 
 # ── Workflow metrics ──────────────────────────────────────────────────────────
 INCIDENT_SUBMITTED = Counter(

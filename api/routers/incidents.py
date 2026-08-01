@@ -5,7 +5,7 @@ import uuid
 from typing import TypedDict
 
 import structlog
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from langchain_core.runnables import RunnableConfig
 
 from agents.orchestrator.graph import get_graph

@@ -10,7 +10,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from agents.orchestrator.graph import build_graph
-from agents.state import IncidentState
 
 
 LOW_RISK_INCIDENT = {

@@ -25,7 +25,6 @@ import logging
 import threading
 from datetime import datetime, timezone
 from queue import Empty, Queue
-from typing import Any
 
 import structlog
 

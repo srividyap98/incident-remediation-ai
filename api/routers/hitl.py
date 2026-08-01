@@ -7,13 +7,11 @@ from langgraph.types import Command
 
 from agents.orchestrator.graph import get_graph
 from api.auth import ANONYMOUS, get_current_principal
+from api.routers.incidents import _thread_store
 from api.schemas.models import HITLResumeRequest, IncidentResponse
 
 logger = structlog.get_logger(__name__)
 router = APIRouter()
-
-# Import the same thread store from incidents router
-from api.routers.incidents import _thread_store
 
 
 @router.post("/resume", response_model=IncidentResponse)

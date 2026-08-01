@@ -1,0 +1,18 @@
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: incident-ai-demo
+  region: us-east-2
+  version: "1.31"
+
+managedNodeGroups:
+  - name: ng-default
+    instanceType: m7i-flex.large
+    desiredCapacity: 2
+    minSize: 2
+    maxSize: 2
+    volumeSize: 20
+
+iam:
+  withOIDC: true

@@ -19,6 +19,10 @@ data:
   VECTOR_STORE_BACKEND: "qdrant"
   RETRIEVER_TOP_K: "5"
   LLM_TEMPERATURE: "0.2"
+  BEDROCK_LLM_MODEL_ID: "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+  BEDROCK_EMBEDDING_MODEL_ID: "amazon.titan-embed-text-v2:0"
+  QDRANT_URL: "https://8513b425-0e74-4bf6-8b2c-c84437afbd21.us-west-1-0.aws.cloud.qdrant.io"
+  QDRANT_COLLECTION: "incident_knowledge"
 
 ---
 # Deployment
@@ -31,7 +35,7 @@ metadata:
     app: incident-ai-api
     version: "0.1.0"
 spec:
-  replicas: 3
+  replicas: 2
   selector:
     matchLabels:
       app: incident-ai-api
@@ -52,7 +56,7 @@ spec:
       serviceAccountName: incident-ai-sa   # IRSA for Bedrock access
       containers:
         - name: api
-          image: <AWS_ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/incident-ai:latest
+          image: 646966486357.dkr.ecr.us-east-2.amazonaws.com/incident-remediation-ai:latest
           imagePullPolicy: Always
           ports:
             - containerPort: 8000
@@ -64,27 +68,30 @@ spec:
                 name: incident-ai-secrets   # QDRANT_API_KEY, etc.
           env:
             - name: AWS_REGION
-              value: "us-east-1"
+              value: "us-east-2"
           resources:
             requests:
-              cpu: "500m"
-              memory: "1Gi"
+              cpu: "250m"
+              memory: "512Mi"
             limits:
-              cpu: "2"
-              memory: "4Gi"
+              cpu: "1"
+              memory: "2Gi"
           livenessProbe:
             httpGet:
               path: /health
               port: 8000
             initialDelaySeconds: 30
             periodSeconds: 15
-            failureThreshold: 3
+            timeoutSeconds: 8
+            failureThreshold: 5
           readinessProbe:
             httpGet:
               path: /health
               port: 8000
             initialDelaySeconds: 10
             periodSeconds: 10
+            timeoutSeconds: 8
+            failureThreshold: 5
 
 ---
 # Service
@@ -138,4 +145,4 @@ metadata:
   name: incident-ai-sa
   namespace: incident-ai
   annotations:
-    eks.amazonaws.com/role-arn: arn:aws:iam::<AWS_ACCOUNT_ID>:role/incident-ai-bedrock-role
+    eks.amazonaws.com/role-arn: arn:aws:iam::646966486357:role/incident-ai-bedrock-role

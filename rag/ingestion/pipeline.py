@@ -13,7 +13,6 @@ from __future__ import annotations
 
 # argparse Python's built-in standard library module used to create professional, user-friendly Command-Line Interfaces (CLIs)
 import argparse
-import os
 from pathlib import Path
 # Boto3 is a SDK for AWS services and is only required for S3 ingestion here, so we import it lazily to avoid unnecessary dependencies.
 import boto3
@@ -23,7 +22,6 @@ from langchain_core.documents import Document
 
 import config.offline_mode  # noqa: F401 — must patch boto3/embeddings before rag imports below
 from config.settings import get_settings
-from rag.embeddings.bedrock import get_embeddings
 from rag.vector_store.factory import get_vector_store
 
 logger = structlog.get_logger(__name__)
