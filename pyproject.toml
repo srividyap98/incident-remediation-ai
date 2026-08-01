@@ -71,7 +71,7 @@ dev = [
     "pytest-cov>=5.0.0",
     "httpx>=0.27.0",
     "moto[bedrock,s3]>=5.0.0",
-    "ruff>=0.7.0",
+    "ruff==0.15.22",  # pinned: newer releases have added lint rules to the default set, breaking CI reproducibility
     "mypy>=1.13.0",
     "sentence-transformers>=3.0.0",  # For OFFLINE_MODE local embeddings, no AWS needed
 ]
