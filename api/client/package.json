@@ -1,0 +1,12 @@
+{
+  "name": "incident-remediation-ai-client",
+  "version": "2.0.0",
+  "description": "TypeScript client SDK for the Incident Remediation AI API",
+  "type": "module",
+  "main": "sdk.ts",
+  "types": "types.ts",
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "@types/node": "^20.14.0"
+  }
+}

@@ -1,0 +1,141 @@
+---
+# Namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: incident-ai
+
+---
+# ConfigMap for non-secret config
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: incident-ai-config
+  namespace: incident-ai
+data:
+  API_HOST: "0.0.0.0"
+  API_PORT: "8000"
+  API_LOG_LEVEL: "info"
+  VECTOR_STORE_BACKEND: "qdrant"
+  RETRIEVER_TOP_K: "5"
+  LLM_TEMPERATURE: "0.2"
+
+---
+# Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: incident-ai-api
+  namespace: incident-ai
+  labels:
+    app: incident-ai-api
+    version: "0.1.0"
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: incident-ai-api
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: incident-ai-api
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/metrics"
+        prometheus.io/port: "8000"
+    spec:
+      serviceAccountName: incident-ai-sa   # IRSA for Bedrock access
+      containers:
+        - name: api
+          image: <AWS_ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/incident-ai:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+              name: http
+          envFrom:
+            - configMapRef:
+                name: incident-ai-config
+            - secretRef:
+                name: incident-ai-secrets   # QDRANT_API_KEY, etc.
+          env:
+            - name: AWS_REGION
+              value: "us-east-1"
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+
+---
+# Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: incident-ai-api
+  namespace: incident-ai
+spec:
+  selector:
+    app: incident-ai-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8000
+  type: ClusterIP
+
+---
+# HorizontalPodAutoscaler
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: incident-ai-api-hpa
+  namespace: incident-ai
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: incident-ai-api
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+
+---
+# ServiceAccount with IRSA annotation for Bedrock
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: incident-ai-sa
+  namespace: incident-ai
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::<AWS_ACCOUNT_ID>:role/incident-ai-bedrock-role
