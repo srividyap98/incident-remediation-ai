@@ -17,21 +17,25 @@ from __future__ import annotations
 
 import json
 import os
+from typing import TYPE_CHECKING, Any, Callable
 
 import boto3
 import structlog
+
+if TYPE_CHECKING:
+    from agents.state import IncidentState
 
 # Lazy imports — speed up cold start
 logger = structlog.get_logger(__name__)
 
 
-def _load_workflow():
+def _load_workflow() -> Callable[..., "IncidentState"]:
     """Import heavy deps only inside handler (reduces Lambda cold start time)."""
     from agents.orchestrator.graph import run_incident_workflow
     return run_incident_workflow
 
 
-def _store_result(incident_id: str, result: dict) -> None:
+def _store_result(incident_id: str, result: dict[str, Any]) -> None:
     """Persist workflow result to DynamoDB."""
     dynamodb = boto3.resource("dynamodb", region_name=os.environ.get("AWS_REGION", "us-east-1"))
     table = dynamodb.Table(os.environ.get("RESULTS_TABLE", "incident-ai-results"))
@@ -48,7 +52,7 @@ def _store_result(incident_id: str, result: dict) -> None:
     )
 
 
-def handler(event: dict, context) -> dict:
+def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     """
     Lambda entrypoint.
 
