@@ -17,6 +17,7 @@ class IncidentRequest(BaseModel):
     incident_description: str = Field(..., min_length=10)
     severity: Literal["P1", "P2", "P3", "P4"] = "P3"
     affected_service: str = Field(..., description="Name of the impacted service")
+    org: str | None = Field(default=None, description="Org identifier, used to route the incident internally")
     timeline_events: list[TimelineEvent] = Field(default_factory=list)
     raw_logs: list[str] = Field(default_factory=list, max_length=50)
 
@@ -24,6 +25,7 @@ class IncidentRequest(BaseModel):
 class IncidentResponse(BaseModel):
     incident_id: str
     thread_id: str
+    org: str | None = None
     status: Literal["completed", "pending_review", "error"]
     risk_score: float | None = None
     requires_human_review: bool = False

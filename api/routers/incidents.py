@@ -27,13 +27,16 @@ class ThreadInfo(TypedDict):
 _thread_store: dict[str, ThreadInfo] = {}
 
 
-@router.post("/", response_model=IncidentResponse, status_code=202)
-async def submit_incident(request: IncidentRequest) -> IncidentResponse:
+async def _run_workflow_and_build_response(request: IncidentRequest) -> IncidentResponse:
     """
-    Submit an incident for multi-agent analysis and remediation.
+    Core orchestration glue: run the LangGraph workflow for `request` and
+    build the API response.
 
-    Returns immediately with status=pending_review if HITL is triggered,
-    or status=completed with full remediation guidance otherwise.
+    Shared by the native /api/v1/incidents/ endpoint and any integration
+    adapter (e.g. api/routers/servicenow.py) that maps its own payload shape
+    onto IncidentRequest first. This function — and everything it calls — is
+    the one place that talks to the AI workflow itself; adapters must not
+    duplicate this logic or reach into the workflow directly.
     """
     thread_id = str(uuid.uuid4())
     log = logger.bind(incident_id=request.incident_id, thread_id=thread_id)
@@ -77,6 +80,7 @@ async def submit_incident(request: IncidentRequest) -> IncidentResponse:
     return IncidentResponse(
         incident_id=request.incident_id,
         thread_id=thread_id,
+        org=request.org,
         status=status,
         risk_score=final_state.get("risk_score"),
         requires_human_review=final_state.get("requires_human_review", False),
@@ -88,6 +92,17 @@ async def submit_incident(request: IncidentRequest) -> IncidentResponse:
         risk_factors=final_state.get("risk_factors", []),
         error=final_state.get("error"),
     )
+
+
+@router.post("/", response_model=IncidentResponse, status_code=202)
+async def submit_incident(request: IncidentRequest) -> IncidentResponse:
+    """
+    Submit an incident for multi-agent analysis and remediation.
+
+    Returns immediately with status=pending_review if HITL is triggered,
+    or status=completed with full remediation guidance otherwise.
+    """
+    return await _run_workflow_and_build_response(request)
 
 
 @router.get("/{incident_id}", response_model=IncidentResponse)
