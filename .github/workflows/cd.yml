@@ -46,6 +46,7 @@ jobs:
         run: aws eks update-kubeconfig --name "$EKS_CLUSTER" --region "$AWS_REGION"
 
       - name: Deploy new image
+        id: deploy
         env:
           REGISTRY: ${{ steps.ecr-login.outputs.registry }}
           IMAGE_TAG: ${{ github.sha }}
@@ -54,3 +55,18 @@ jobs:
             api="$REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" \
             -n "$K8S_NAMESPACE"
           kubectl rollout status deployment/"$K8S_DEPLOYMENT" -n "$K8S_NAMESPACE" --timeout=600s
+
+      # Validated against a local kind cluster: maxUnavailable:0 means old,
+      # healthy pods keep serving traffic the whole time a bad rollout is
+      # stuck (nothing in prod goes down) — this step's job is to stop the
+      # bad ReplicaSet from sitting there half-deployed and put the
+      # Deployment spec itself back to the last known-good revision.
+      - name: Roll back on failed rollout
+        if: failure() && steps.deploy.outcome == 'failure'
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          echo "::warning::Rollout of $IMAGE_TAG failed health checks — rolling back to the previous revision"
+          kubectl rollout undo deployment/"$K8S_DEPLOYMENT" -n "$K8S_NAMESPACE"
+          kubectl rollout status deployment/"$K8S_DEPLOYMENT" -n "$K8S_NAMESPACE" --timeout=300s
+          echo "::error::Deploy of $IMAGE_TAG failed and was automatically rolled back. Investigate before retrying — this job is still marked failed on purpose."

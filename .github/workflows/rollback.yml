@@ -1,0 +1,64 @@
+name: Manual Rollback
+
+# For a bad deploy discovered AFTER the fact — i.e. it passed CD's health
+# checks (kubectl rollout status) but is misbehaving in some way those
+# checks can't see. cd.yml already rolls back automatically when the
+# rollout itself fails; this workflow is the human-triggered escape hatch
+# for everything else. Run from the Actions tab, or:
+#   gh workflow run rollback.yml
+#   gh workflow run rollback.yml -f revision=12
+
+on:
+  workflow_dispatch:
+    inputs:
+      revision:
+        description: >
+          Deployment revision to roll back to (see the "Show rollout
+          history" step's output for available revisions). Leave blank to
+          roll back to the immediately previous revision.
+        required: false
+        default: ""
+
+env:
+  AWS_REGION: us-east-2
+  EKS_CLUSTER: incident-ai-demo
+  K8S_NAMESPACE: incident-ai
+  K8S_DEPLOYMENT: incident-ai-api
+
+permissions:
+  id-token: write # required for OIDC -> AWS role assumption
+  contents: read
+
+jobs:
+  rollback:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS credentials (OIDC, no long-lived keys)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::646966486357:role/incident-ai-github-actions
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name "$EKS_CLUSTER" --region "$AWS_REGION"
+
+      - name: Show rollout history
+        run: kubectl rollout history deployment/"$K8S_DEPLOYMENT" -n "$K8S_NAMESPACE"
+
+      - name: Roll back
+        env:
+          REVISION: ${{ inputs.revision }}
+        run: |
+          if [ -n "$REVISION" ]; then
+            echo "Rolling back to revision $REVISION"
+            kubectl rollout undo deployment/"$K8S_DEPLOYMENT" -n "$K8S_NAMESPACE" --to-revision="$REVISION"
+          else
+            echo "Rolling back to the previous revision"
+            kubectl rollout undo deployment/"$K8S_DEPLOYMENT" -n "$K8S_NAMESPACE"
+          fi
+          kubectl rollout status deployment/"$K8S_DEPLOYMENT" -n "$K8S_NAMESPACE" --timeout=400s
+
+      - name: Confirm health
+        run: |
+          kubectl get pods -n "$K8S_NAMESPACE" -l app="$K8S_DEPLOYMENT" -o wide
+          kubectl get deployment "$K8S_DEPLOYMENT" -n "$K8S_NAMESPACE"
