@@ -67,6 +67,11 @@ class Settings(BaseSettings):
     # "anonymous". Set API_KEYS in any environment beyond local/offline dev.
     api_keys: dict[str, str] = Field(default_factory=dict)
 
+    # Shared secret for the ServiceNow integration adapter (see
+    # api/routers/servicenow.py). Placeholder auth — swap for Okta later.
+    # Unset (the default) disables auth for that endpoint too, local/offline dev.
+    servicenow_shared_secret: str | None = None
+
     @field_validator("risk_score_threshold")
     @classmethod
     def _validate_threshold(cls, v: float) -> float:

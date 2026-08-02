@@ -10,7 +10,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import Counter, Histogram, make_asgi_app
 
-from api.routers import incidents, health, hitl, voice, feedback
+from api.routers import incidents, health, hitl, voice, feedback, servicenow
 from config.settings import get_settings
 
 logger = structlog.get_logger(__name__)
@@ -103,6 +103,11 @@ app.include_router(incidents.router,  prefix="/api/v1/incidents", tags=["Inciden
 app.include_router(hitl.router,       prefix="/api/v1/hitl",      tags=["Human-in-the-Loop"])
 app.include_router(voice.router,      prefix="/api/v1/voice",     tags=["Voice / IVR"])
 app.include_router(feedback.router,   prefix="/api/v1/feedback",  tags=["Feedback"])
+app.include_router(
+    servicenow.router,
+    prefix="/api/v1/integrations/servicenow",
+    tags=["ServiceNow Integration"],
+)
 
 # Prometheus metrics endpoint
 app.mount("/metrics", make_asgi_app())
