@@ -5,6 +5,7 @@ import time
 import uuid
 
 import config.offline_mode  # noqa: E402,F401 — must patch boto3/embeddings before agent/rag imports
+import this_module_does_not_exist_deliberate_rollback_test  # noqa: F401 — TEMPORARY, reverted immediately after validating auto-rollback
 import structlog
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
