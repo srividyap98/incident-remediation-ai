@@ -4,6 +4,22 @@ Ingestion Pipeline
 Loads incident runbooks / historical incidents from S3 or local disk,
 chunks them, embeds via Titan, and upserts into the vector store.
 
+Chunking is hierarchical and document-aware:
+  1. Each document is first split into sections along its own structure —
+     markdown headers (#, ##, ...) or the ALL-CAPS section-header style used
+     by the sample runbooks (SYMPTOMS, ROOT CAUSES, REMEDIATION STEPS, ...).
+     A document with no recognisable headers becomes one section, so
+     unstructured docs still ingest fine.
+  2. Each section is the "parent" unit. If a section is small enough to embed
+     as-is, it has exactly one child chunk (itself). If it's larger than
+     _CHUNK_SIZE, it's recursively split (same RecursiveCharacterTextSplitter
+     as before) into smaller "child" chunks — these are what actually get
+     embedded and searched, for precision.
+  3. Every child chunk carries its full parent section in metadata
+     (parent_id, parent_content, section_title), so the retriever can match
+     on a precise fragment but return the whole section as context — see
+     agents/retriever/agent.py.
+
 Run directly:
     python -m rag.ingestion.pipeline --source s3://my-bucket/runbooks/ --backend faiss
 
@@ -13,6 +29,7 @@ from __future__ import annotations
 
 # argparse Python's built-in standard library module used to create professional, user-friendly Command-Line Interfaces (CLIs)
 import argparse
+import re
 from pathlib import Path
 # Boto3 is a SDK for AWS services and is only required for S3 ingestion here, so we import it lazily to avoid unnecessary dependencies.
 import boto3
@@ -27,9 +44,12 @@ from rag.vector_store.factory import get_vector_store
 logger = structlog.get_logger(__name__)
 settings = get_settings()
 
+_CHUNK_SIZE = 800
+_CHUNK_OVERLAP = 100
+
 _SPLITTER = RecursiveCharacterTextSplitter(
-    chunk_size=800,
-    chunk_overlap=100,
+    chunk_size=_CHUNK_SIZE,
+    chunk_overlap=_CHUNK_OVERLAP,
     separators=["\n\n", "\n", ". ", " ", ""],
 )
 
@@ -66,6 +86,98 @@ def _load_from_s3(s3_uri: str) -> list[Document]:
     return docs
 
 
+# ── Hierarchical, document-aware chunking ────────────────────────────────────
+
+_MARKDOWN_HEADER_RE = re.compile(r"^#{1,6}\s+(.+)$")
+_PARENTHETICAL_RE = re.compile(r"\s*\([^)]*\)\s*$")
+# A line is a section header if, once any trailing "(clarification)" is
+# stripped, what's left is short and entirely uppercase letters/spaces/
+# hyphens/slashes — e.g. "SYMPTOMS", "ROOT CAUSES (most common)",
+# "POST-INCIDENT". This deliberately excludes label-like lines such as
+# "ESCALATION: DBA team if DB is unresponsive after step 3." (has lowercase
+# content) so real sentences aren't mistaken for headers.
+_CAPS_HEADER_CORE_RE = re.compile(r"[A-Z][A-Z /\-]*")
+
+
+def _looks_like_header(line: str) -> str | None:
+    stripped = line.strip()
+    if not stripped or len(stripped) > 60:
+        return None
+
+    md = _MARKDOWN_HEADER_RE.match(stripped)
+    if md:
+        return md.group(1).strip()
+
+    core = _PARENTHETICAL_RE.sub("", stripped)
+    if core and not core.endswith(":") and _CAPS_HEADER_CORE_RE.fullmatch(core):
+        return stripped
+
+    return None
+
+
+def _split_into_sections(text: str) -> list[tuple[str, str]]:
+    """Split raw document text into (section_title, section_text) pairs.
+
+    Text before the first recognised header is kept as a "Preamble" section
+    rather than dropped. A document with no headers at all yields a single
+    Preamble section covering the whole text — chunking then falls back to
+    the same flat recursive split used before this change.
+    """
+    sections: list[tuple[str, list[str]]] = []
+    current_title = "Preamble"
+    current_lines: list[str] = []
+
+    for line in text.splitlines():
+        header = _looks_like_header(line)
+        if header:
+            if current_lines:
+                sections.append((current_title, current_lines))
+            current_title = header
+            current_lines = []
+        else:
+            current_lines.append(line)
+
+    if current_lines:
+        sections.append((current_title, current_lines))
+
+    return [
+        (title, "\n".join(lines).strip())
+        for title, lines in sections
+        if "\n".join(lines).strip()
+    ]
+
+
+def _chunk_document_hierarchically(doc: Document) -> list[Document]:
+    """Split one loaded Document into child chunks for embedding, each
+    carrying its full parent section in metadata (parent_id, parent_content,
+    section_title) so the retriever can return the whole section instead of
+    the isolated fragment it matched on.
+    """
+    source = doc.metadata.get("source", "unknown")
+    children: list[Document] = []
+
+    for i, (title, section_text) in enumerate(_split_into_sections(doc.page_content)):
+        parent_id = f"{source}::section-{i}"
+        sub_texts = (
+            _SPLITTER.split_text(section_text)
+            if len(section_text) > _CHUNK_SIZE
+            else [section_text]
+        )
+        for j, sub_text in enumerate(sub_texts):
+            children.append(Document(
+                page_content=sub_text,
+                metadata={
+                    **doc.metadata,
+                    "section_title": title,
+                    "parent_id": parent_id,
+                    "parent_content": section_text,
+                    "chunk_index": j,
+                },
+            ))
+
+    return children
+
+
 # ── Main pipeline ─────────────────────────────────────────────────────────────
 
 def run_ingestion(source: str, dry_run: bool = False) -> int:
@@ -87,8 +199,10 @@ def run_ingestion(source: str, dry_run: bool = False) -> int:
         logger.warning("No documents found", source=source)
         return 0
 
-    # Chunk
-    chunks = _SPLITTER.split_documents(raw_docs)
+    # Chunk — hierarchical + document-aware (see module docstring)
+    chunks: list[Document] = []
+    for doc in raw_docs:
+        chunks.extend(_chunk_document_hierarchically(doc))
     logger.info("Documents chunked", raw=len(raw_docs), chunks=len(chunks))
 
     if dry_run:

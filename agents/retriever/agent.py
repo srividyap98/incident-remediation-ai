@@ -42,17 +42,41 @@ def _build_query(state: IncidentState) -> str:
     reraise=True,
 )
 def _search(query: str) -> list[dict]:
+    """Search child chunks, but return their parent sections.
+
+    Ingestion (rag/ingestion/pipeline.py) embeds small child chunks for
+    precision and tags each one with its full parent section. Several
+    children can share one parent, so we oversample child hits and
+    deduplicate by parent_id, returning up to retriever_top_k distinct
+    sections instead of isolated, possibly redundant fragments.
+    """
     store = get_vector_store()
-    results = store.similarity_search_with_score(query, k=settings.retriever_top_k)
-    return [
-        {
-            "content": doc.page_content,
+    candidate_k = settings.retriever_top_k * 3
+    results = store.similarity_search_with_score(query, k=candidate_k)
+
+    seen_parents: set[str] = set()
+    docs: list[dict] = []
+    for doc, score in results:
+        parent_id = doc.metadata.get("parent_id")
+        # Fall back to the matched fragment itself for data ingested before
+        # hierarchical chunking existed (no parent_content in metadata).
+        content = doc.metadata.get("parent_content", doc.page_content)
+        dedup_key = parent_id or content
+        if dedup_key in seen_parents:
+            continue
+        seen_parents.add(dedup_key)
+
+        docs.append({
+            "content": content,
             "source": doc.metadata.get("source", "unknown"),
+            "section_title": doc.metadata.get("section_title"),
             "score": float(score),
             "metadata": doc.metadata,
-        }
-        for doc, score in results
-    ]
+        })
+        if len(docs) >= settings.retriever_top_k:
+            break
+
+    return docs
 
 
 def retriever_agent(state: IncidentState) -> dict:
