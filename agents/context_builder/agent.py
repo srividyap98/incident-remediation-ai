@@ -45,10 +45,12 @@ def _build_docs_section(docs: list[dict], budget_chars: int) -> str:
     sections: list[str] = []
     used = 0
     for i, doc in enumerate(docs, 1):
-        snippet = (
-            f"[Doc {i} | Source: {doc['source']} | Relevance: {doc['score']:.2f}]\n"
-            f"{doc['content']}"
-        )
+        section_title = doc.get("section_title")
+        header = f"[Doc {i} | Source: {doc['source']}"
+        if section_title:
+            header += f" | Section: {section_title}"
+        header += f" | Relevance: {doc['score']:.2f}]"
+        snippet = f"{header}\n{doc['content']}"
         if used + len(snippet) > budget_chars:
             break
         sections.append(snippet)
