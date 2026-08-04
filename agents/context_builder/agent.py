@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
+import boto3
 import structlog
 
 from agents.state import IncidentState
@@ -19,13 +20,33 @@ from config.settings import get_settings
 logger = structlog.get_logger(__name__)
 settings = get_settings()
 
-# Rough char-to-token ratio for Claude models (conservative)
+# Rough char-to-token ratio — used only to size the docs/logs char budget
+# below *before* the final context string exists. This is a cheap upper-bound
+# heuristic, not the reported count; the actual token count logged/returned
+# comes from Bedrock's CountTokens API (_count_tokens), which is model-exact.
 _CHARS_PER_TOKEN = 3.5
 _CONTEXT_TOKEN_BUDGET = 6_000   # Reserve headroom for the full prompt + output
 
 
-def _token_estimate(text: str) -> int:
-    return int(len(text) / _CHARS_PER_TOKEN)
+def _count_tokens(text: str) -> int:
+    """Exact input token count via Bedrock's CountTokens API.
+
+    Matches what the same text would be charged as an inference input —
+    free to call and model-specific, unlike a fixed chars-per-token ratio.
+    Falls back to the char-based estimate if the API call fails (e.g. the
+    model doesn't support CountTokens, or a transient AWS error), so context
+    assembly never breaks over a token-count nicety.
+    """
+    try:
+        client = boto3.client("bedrock-runtime", region_name=settings.aws_region)
+        response = client.count_tokens(
+            modelId=settings.bedrock_llm_model_id,
+            input={"converse": {"messages": [{"role": "user", "content": [{"text": text}]}]}},
+        )
+        return int(response["inputTokens"])
+    except Exception as exc:
+        logger.warning("CountTokens API failed, falling back to char estimate", error=str(exc))
+        return int(len(text) / _CHARS_PER_TOKEN)
 
 
 def _format_structured_metadata(state: IncidentState) -> dict:
@@ -104,15 +125,15 @@ def context_builder_agent(state: IncidentState) -> dict:
         retrieval_query=state.get("retrieval_query", "N/A"),
     )
 
-    token_est = _token_estimate(enriched_context)
-    log.info("Context assembled", estimated_tokens=token_est, docs=len(state.get("retrieved_docs", [])))
+    token_count = _count_tokens(enriched_context)
+    log.info("Context assembled", input_tokens=token_count, docs=len(state.get("retrieved_docs", [])))
 
     return {
         "enriched_context": enriched_context,
         "structured_metadata": metadata,
         "current_agent": "context_builder",
         "agent_messages": [
-            f"[ContextBuilder] Assembled context (~{token_est} tokens, "
+            f"[ContextBuilder] Assembled context ({token_count} tokens, "
             f"{len(state.get('retrieved_docs', []))} docs, "
             f"{len(state.get('raw_logs', []))} log lines)"
         ],

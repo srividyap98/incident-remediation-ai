@@ -13,6 +13,7 @@ Or export before running:
 
 What gets mocked:
   - Bedrock LLM calls → returns realistic canned responses
+  - Bedrock CountTokens calls → chars/4 approximation of the real API
   - Bedrock embeddings → uses sentence-transformers/all-MiniLM-L6-v2 (local, free)
   - No network calls leave your machine
 """
@@ -96,7 +97,19 @@ def build_mock_bedrock_client():
             "usage": {"inputTokens": 500, "outputTokens": 200},
         }
 
+    def count_tokens_side_effect(**kwargs):
+        text = ""
+        messages = kwargs.get("input", {}).get("converse", {}).get("messages", [])
+        if messages:
+            content = messages[0].get("content", [])
+            if content:
+                text = content[0].get("text", "")
+        # Rough chars/4 approximation — good enough for offline dev, and
+        # keeps the mock's shape identical to the real CountTokens response.
+        return {"inputTokens": max(1, len(text) // 4)}
+
     client.converse.side_effect = converse_side_effect
+    client.count_tokens.side_effect = count_tokens_side_effect
     return client
 
 

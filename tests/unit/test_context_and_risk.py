@@ -6,9 +6,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from agents.context_builder.agent import context_builder_agent
+from agents.context_builder.agent import _count_tokens, context_builder_agent
 from agents.risk_evaluator.agent import _heuristic_score, risk_evaluator_agent
 from agents.state import IncidentState
+from config.settings import get_settings
 
 
 # ── Shared fixtures ───────────────────────────────────────────────────────────
@@ -41,6 +42,16 @@ def base_state() -> IncidentState:
 # ── Context Builder tests ─────────────────────────────────────────────────────
 
 class TestContextBuilderAgent:
+    @pytest.fixture(autouse=True)
+    def mock_count_tokens(self):
+        """context_builder_agent now calls Bedrock's CountTokens API — mock it
+        for every test in this class so they stay hermetic (no real AWS call)."""
+        with patch("agents.context_builder.agent.boto3.client") as mock_boto:
+            mock_client = MagicMock()
+            mock_client.count_tokens.return_value = {"inputTokens": 123}
+            mock_boto.return_value = mock_client
+            yield mock_client
+
     def test_returns_enriched_context(self, base_state):
         result = context_builder_agent(base_state)
         assert "enriched_context" in result
@@ -72,6 +83,37 @@ class TestContextBuilderAgent:
     def test_agent_message_logged(self, base_state):
         result = context_builder_agent(base_state)
         assert any("ContextBuilder" in m for m in result["agent_messages"])
+
+
+class TestCountTokens:
+    """_count_tokens uses Bedrock's CountTokens API for a model-exact count,
+    falling back to the chars/3.5 heuristic only if that API call fails."""
+
+    @patch("agents.context_builder.agent.boto3.client")
+    def test_uses_bedrock_count_tokens_api(self, mock_boto):
+        mock_client = MagicMock()
+        mock_client.count_tokens.return_value = {"inputTokens": 42}
+        mock_boto.return_value = mock_client
+
+        result = _count_tokens("some enriched context text")
+
+        assert result == 42
+        _, kwargs = mock_client.count_tokens.call_args
+        assert kwargs["modelId"] == get_settings().bedrock_llm_model_id
+        assert (
+            kwargs["input"]["converse"]["messages"][0]["content"][0]["text"]
+            == "some enriched context text"
+        )
+
+    @patch("agents.context_builder.agent.boto3.client")
+    def test_falls_back_to_char_estimate_on_api_error(self, mock_boto):
+        mock_client = MagicMock()
+        mock_client.count_tokens.side_effect = Exception("CountTokens unavailable")
+        mock_boto.return_value = mock_client
+
+        result = _count_tokens("x" * 350)  # 350 chars / 3.5 == 100
+
+        assert result == 100
 
 
 # ── Risk Evaluator tests ──────────────────────────────────────────────────────
