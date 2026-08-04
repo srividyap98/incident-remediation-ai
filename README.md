@@ -81,6 +81,78 @@ incident-remediation-ai/
 └── Makefile                       # Developer commands
 ```
 
+## Request Lifecycle — Step by Step
+
+This walks through everything that happens to **one** `POST /api/v1/incidents/` request, from the moment it hits the process to the moment a response goes back over the wire. Each step names the exact file responsible.
+
+```
+Client
+  │  POST /api/v1/incidents/
+  ▼
+[0] logging_middleware ───────────────── api/main.py
+  ▼
+[1] get_current_principal (auth) ─────── api/auth.py
+  ▼
+[2] submit_incident (router) ─────────── api/routers/incidents.py
+  ▼
+[3] get_graph().stream(...) ──────────── agents/orchestrator/graph.py
+  │
+  ├─[4] retriever ─────────────────────── agents/retriever/agent.py
+  │       └─ get_vector_store() ───────── rag/vector_store/factory.py
+  │             └─ get_embeddings() ───── rag/embeddings/bedrock.py  (Titan v2, AWS Bedrock)
+  │             └─ FAISS or Qdrant similarity search
+  │
+  ├─[5] context_builder ───────────────── agents/context_builder/agent.py
+  │
+  ├─[6] risk_evaluator ─────────────────── agents/risk_evaluator/agent.py
+  │       └─ boto3 bedrock-runtime.converse()  (Claude Sonnet 4.5)
+  │
+  ├─[7] route_after_risk ──────────────── agents/orchestrator/graph.py
+  │       ├─ score < threshold ─────────┐
+  │       └─ score ≥ threshold ─────┐   │
+  │                                 ▼   │
+  │            [7a] human_review_node   │  agents/orchestrator/graph.py
+  │                  interrupt() → graph pauses, checkpointed by MemorySaver
+  │                  → API returns status=pending_review immediately
+  │                  ... (later) POST /api/v1/hitl/resume ─ api/routers/hitl.py
+  │                  → Command(resume=...) re-enters the graph at this node
+  │                                 │   │
+  │                                 ▼   ▼
+  ├─[8] response_generator ────────────── agents/response_generator/agent.py
+  │       └─ boto3 bedrock-runtime.converse()  (Claude Sonnet 4.5, JSON mode)
+  │
+  ├─[9] evaluator ──────────────────────── agents/orchestrator/graph.py (evaluator_node)
+  │       ├─ check_grounding() ─────────── evaluation/hallucination_guard.py
+  │       └─ log_llm_interaction() ─────── monitoring/arize_logger.py
+  │
+  ▼
+[10] END → final_state returned to router
+  ▼
+[11] IncidentResponse built ──────────── api/routers/incidents.py, api/schemas/models.py
+  ▼
+[12] Prometheus metrics + response log ─ api/main.py (logging_middleware)
+  ▼
+Client ◄── JSON response
+```
+
+### Step-by-step detail
+
+0. **Request enters the process** — [api/main.py](api/main.py)'s `logging_middleware` fires first for every request: generates a `request_id` (UUID), binds it to `structlog`'s contextvars so every downstream log line carries it, and starts a latency timer.
+1. **Authentication** — [api/auth.py](api/auth.py)'s `get_current_principal` runs as a router dependency, reading the `X-API-Key` header. If `API_KEYS` is unset (local/offline dev), it's a no-op that returns `"anonymous"`; otherwise an invalid/missing key raises `401`. This is the documented swap-in point for Okta.
+2. **Routing + request validation** — FastAPI matches `POST /api/v1/incidents/` to `submit_incident` in [api/routers/incidents.py](api/routers/incidents.py), validating the body against the `IncidentRequest` Pydantic model ([api/schemas/models.py](api/schemas/models.py)). It immediately delegates to `_run_workflow_and_build_response`, the single shared entry point into the AI workflow (also reused by the ServiceNow adapter in `api/routers/servicenow.py`).
+3. **Graph kickoff** — a fresh `thread_id` (UUID) is minted, the incident payload is flattened into a dict, and `get_graph()` (a process-wide cached `CompiledStateGraph`) is streamed with that input — [agents/orchestrator/graph.py](agents/orchestrator/graph.py). The `thread_id` is the LangGraph checkpoint key that makes HITL resume possible later.
+4. **Retriever node** — [agents/retriever/agent.py](agents/retriever/agent.py) builds a semantic query from the incident's title/severity/service/description, then calls `get_vector_store()` ([rag/vector_store/factory.py](rag/vector_store/factory.py)), which lazily builds a FAISS or Qdrant store depending on `VECTOR_STORE_BACKEND`, embedding the query via Titan v2 ([rag/embeddings/bedrock.py](rag/embeddings/bedrock.py)). It oversamples child chunks, deduplicates by `parent_id`, and returns full parent sections (see the hierarchical chunking design in [rag/ingestion/pipeline.py](rag/ingestion/pipeline.py)) as `retrieved_docs`.
+5. **Context builder node** — [agents/context_builder/agent.py](agents/context_builder/agent.py) assembles `retrieved_docs` + structured incident metadata + raw logs into one token-budgeted `enriched_context` string, ready for LLM prompts.
+6. **Risk evaluator node** — [agents/risk_evaluator/agent.py](agents/risk_evaluator/agent.py) computes a heuristic score from severity/timeline, then calls Bedrock Claude directly via `boto3` (`bedrock-runtime.converse`) for an LLM-based risk score + top risk factors, blending the two (30/70). Writes `risk_score`, `risk_factors`, `requires_human_review` to state.
+7. **Conditional routing** — `route_after_risk` in [agents/orchestrator/graph.py](agents/orchestrator/graph.py) branches on `requires_human_review` (i.e. `risk_score >= RISK_SCORE_THRESHOLD`):
+   - **Below threshold** → straight to `response_generator`.
+   - **At/above threshold** → `human_review_node` calls LangGraph's `interrupt()`, which pauses the graph and persists its state via the `MemorySaver` checkpointer, keyed by `thread_id`. The API call returns right away with `status="pending_review"` and the `thread_id`. A human later calls `POST /api/v1/hitl/resume` ([api/routers/hitl.py](api/routers/hitl.py)) with an approve/reject decision; that re-enters the *same* graph at the checkpoint and continues.
+8. **Response generator node** — [agents/response_generator/agent.py](agents/response_generator/agent.py) sends `enriched_context` to Bedrock Claude Sonnet 4.5 (`converse`, JSON-mode prompt), parses the structured JSON (root cause, remediation steps, confidence), and composes the human-readable `final_response` string.
+9. **Evaluator node (post-generation quality gate)** — `evaluator_node` in [agents/orchestrator/graph.py](agents/orchestrator/graph.py) runs a hallucination/grounding check via [evaluation/hallucination_guard.py](evaluation/hallucination_guard.py) (are the generated claims actually supported by `retrieved_docs`?) and logs the full interaction — prompt, response, scores, grounding warnings — to Arize via [monitoring/arize_logger.py](monitoring/arize_logger.py). Skipped if HITL rejected the incident (no `final_response` to check).
+10. **Graph reaches `END`** — the last streamed state (`final_state`) is what the router receives back.
+11. **Response assembly** — back in [api/routers/incidents.py](api/routers/incidents.py), `_run_workflow_and_build_response` derives `status` (`completed` / `pending_review` / `error`) from `final_state` and builds the `IncidentResponse` model ([api/schemas/models.py](api/schemas/models.py)). The `thread_id` is also stashed in the in-memory `_thread_store` so `GET /api/v1/incidents/{id}` can look up status later.
+12. **Response leaves the process** — control returns through `logging_middleware` ([api/main.py](api/main.py)), which records the total duration, increments the `api_requests_total` Prometheus counter and `api_request_duration_seconds` histogram (scraped at `/metrics`), and logs the final structured log line before the JSON response is sent to the client.
+
 ## Quick Start
 
 ### 1. Prerequisites
